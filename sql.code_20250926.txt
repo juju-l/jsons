@@ -1,0 +1,41 @@
+-- 基于多实例、多项目场景，输出“项目→实例”层级JSON
+SELECT 
+  json_object(
+    i.project,  -- 外层键：项目名称
+    -- 内层值：该项目下所有实例的聚合（实例名→实例详情）
+    json_group_object(
+      i.names,  -- 内层键：实例名称
+      json_object(  -- 内层值：实例详情
+        'dbLists', json_group_array(d.names),
+        'srCert', i.srCert,
+        'dnsNames', i.dnsNames,
+        'iamUser', d.iamUser,
+        'selfLinks', fr.selfLinks,
+        'target', fr.target,
+        'address', a.address,  -- 补充address表字段（强关联必存在）
+        'subnetwork', a.subnetwork
+      )
+    )
+  ) AS result_json
+FROM 
+  instances i
+-- databases用LEFT JOIN（允许实例暂未关联数据库）
+LEFT JOIN databases d 
+  ON i.staffId = d.staffId 
+  AND i.project = d.project 
+  AND i.names = d.instances
+-- forwardingRules用INNER JOIN（强关联，数据必存在）
+INNER JOIN forwardingRules fr 
+  ON i.staffId = fr.staffId 
+  AND i.project = fr.project 
+  AND i.names = fr.names
+-- addresses用INNER JOIN（强关联，数据必存在）
+INNER JOIN addresses a 
+  ON i.staffId = a.staffId 
+  AND i.project = a.project 
+  AND i.names = a.names
+WHERE 
+  i.staffId = 654321
+-- 按项目分组，确保同一项目的实例聚合到一起
+GROUP BY 
+  i.staffId, i.project;
