@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>隐性数据中心星形架构</title>
+    <!-- 改用更稳定的 JTopo 0.4.8 版本（0.48.0 存在布局API兼容问题） -->
+    <script src="https://cdn.jsdelivr.net/npm/jtopo@0.4.8/dist/jtopo-0.4.8-min.js"></script>
+    <style>
+        #dataCenterContainer {
+            width: 100%;
+            height: 600px;
+            border: 1px solid #eee;
+            margin: 20px 0;
+            position: relative;
+        }
+        /* Canvas 必须独立且绝对定位，避免被其他元素遮挡 */
+        #jtopoCanvas {
+            width: 100%;
+            height: 100%;
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 1;
+        }
+        .room-title {
+            position: absolute;
+            font-size: 16px;
+            font-weight: bold;
+            color: #333;
+            z-index: 10;
+        }
+        #room1Title { top: 15%; left: 10%; }
+        #room2Title { top: 80%; left: 50%; transform: translateX(-50%); }
+        #room3Title { top: 15%; right: 10%; }
+        .right-menu {
+            position: absolute;
+            width: 100px;
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            display: none;
+            z-index: 9999;
+        }
+        .right-menu div {
+            padding: 6px 12px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        .right-menu div:hover {
+            background: #f5f5f5;
+            color: #409EFF;
+        }
+    </style>
+</head>
+<body>
+    <h2>隐性数据中心星形架构（3个分机房树）</h2>
+
+    <div id="dataCenterContainer">
+        <!-- 独立Canvas标签（解决getContext和drawImage报错核心） -->
+        <canvas id="jtopoCanvas"></canvas>
+        <div class="room-title" id="room1Title">分机房1</div>
+        <div class="room-title" id="room2Title">分机房2</div>
+        <div class="room-title" id="room3Title">分机房3</div>
+        <div id="rightMenu" class="right-menu">
+            <div data-action="new">新建</div>
+            <div data-action="delete">删除</div>
+            <div data-action="query">查询</div>
+        </div>
+    </div>
+
+    <script>
+        // 1. 基础初始化（确保DOM加载完成后执行，避免元素未找到）
+        document.addEventListener('DOMContentLoaded', function() {
+            const canvas = document.getElementById('jtopoCanvas');
+            const container = document.getElementById('dataCenterContainer');
+            const rightMenu = document.getElementById('rightMenu');
+            let currentNode = null;
+
+            // 修复Canvas尺寸：匹配容器实际大小（避免drawImage拉伸/错位）
+            canvas.width = container.offsetWidth;
+            canvas.height = container.offsetHeight;
+
+            // 初始化JTopo核心对象（0.4.8版本API适配）
+            const stage = new JTopo.Stage(canvas);
+            const scene = new JTopo.Scene(stage);
+            scene.background = '#fafafa';
+
+            // 2. 架构核心配置
+            const hiddenCenter = { 
+                x: canvas.width / 2, 
+                y: canvas.height / 2 
+            };
+            const roomLayout = {
+                radius: 200,
+                count: 3,
+                centers: []
+            };
+            const roomInnerRadius = [0, 40, 80, 120];
+
+            // 3. 计算分机房中心坐标（修复角度计算，确保星形均匀分布）
+            function calcRoomCenters() {
+                roomLayout.centers = [];
+                for (let i = 0; i < roomLayout.count; i++) {
+                    // 初始角度偏移-90度，让第一个分机房在左上方（而非右侧）
+                    const angle = (i / roomLayout.count) * 2 * Math.PI - Math.PI / 2;
+                    roomLayout.centers.push({
+                        x: hiddenCenter.x + roomLayout.radius * Math.cos(angle),
+                        y: hiddenCenter.y + roomLayout.radius * Math.sin(angle)
+                    });
+                }
+            }
+
+            // 4. 创建分机房树（修复节点层级和连接逻辑，避免循环引用）
+            function createRoomTree(roomIndex, roomCenter) {
+                // 分机房根节点
+                const roomRoot = new JTopo.Node(`分机房${roomIndex + 1}-根节点`);
+                roomRoot.setLocation(roomCenter.x, roomCenter.y);
+                roomRoot.fontSize = 14;
+                roomRoot.fontWeight = 'bold';
+                roomRoot.fillColor = '#1AB394';
+                roomRoot.textColor = '#fff';
+                roomRoot.radius = 24;
+                scene.add(roomRoot);
+
+                // 内部节点配置（简化层级，避免节点过多导致重叠）
+                const innerNodes = [
+                    { name: `核心项目${roomIndex + 1}`, color: '#409EFF' },
+                    { name: `服务实例${roomIndex + 1}`, color: '#E6A23C' },
+                    { name: `数据库集群${roomIndex + 1}`, color: '#F56C6C' }
+                ];
+                const childNames = ['存储节点', '计算节点', '监控节点'];
+
+                // 构建节点链（根→项目→实例→数据库→子节点）
+                let prevNode = roomRoot;
+                innerNodes.forEach(nodeInfo => {
+                    const node = new JTopo.Node(nodeInfo.name);
+                    node.fontSize = 12;
+                    node.fillColor = nodeInfo.color;
+                    node.textColor = '#fff';
+                    node.radius = 18;
+                    scene.add(node);
+                    // 修复Link创建方式（0.4.8版本需传stage参数）
+                    new JTopo.Link(prevNode, node, stage).strokeColor = nodeInfo.color;
+                    prevNode = node;
+                });
+
+                // 创建数据库子节点
+                childNames.forEach((name, idx) => {
+                    const node = new JTopo.Node(name);
+                    node.fontSize = 11;
+                    node.fillColor = ['#909399', '#C0C4CC', '#86909C'][idx];
+                    node.textColor = '#fff';
+                    node.radius = 16;
+                    scene.add(node);
+                    new JTopo.Link(prevNode, node, stage).strokeColor = node.fillColor;
+                });
+
+                // 布局当前分机房内部节点
+                layoutInnerNodes(roomRoot, roomCenter);
+                return roomRoot;
+            }
+
+            // 5. 内部节点布局（修复递归逻辑，避免重复处理节点）
+            function layoutInnerNodes(roomRoot, roomCenter) {
+                const layers = [[roomRoot]];
+                const processed = new Set([roomRoot.id]);
+
+                // 分层获取节点（广度优先，避免循环）
+                for (let i = 0; i < layers.length; i++) {
+                    const currentLayer = layers[i];
+                    const nextLayer = [];
+                    currentLayer.forEach(node => {
+                        node.links.forEach(link => {
+                            const child = link.source === node ? link.target : link.source;
+                            if (!processed.has(child.id)) {
+                                processed.add(child.id);
+                                nextLayer.push(child);
+                            }
+                        });
+                    });
+                    if (nextLayer.length > 0) layers.push(nextLayer);
+                }
+
+                // 按层排布（修复半径取值，避免节点超出分机房范围）
+                layers.forEach((nodes, level) => {
+                    const radius = roomInnerRadius[Math.min(level, roomInnerRadius.length - 1)];
+                    const nodeCount = nodes.length;
+                    nodes.forEach((node, idx) => {
+                        const angle = (idx / nodeCount) * 2 * Math.PI;
+                        node.setLocation(
+                            roomCenter.x + radius * Math.cos(angle),
+                            roomCenter.y + radius * Math.sin(angle)
+                        );
+                    });
+                });
+            }
+
+            // 6. 右键菜单逻辑（修复事件委托和坐标计算）
+            container.addEventListener('contextmenu', e => e.preventDefault());
+
+            // 节点右键检测（修复target判断，确保只响应节点）
+            scene.addEventListener('mouseup', function(event) {
+                if (event.button === 2 && event.target instanceof JTopo.Node) {
+                    currentNode = event.target;
+                    // 菜单定位（基于容器坐标，避免超出视口）
+                    const menuLeft = e.clientX - container.getBoundingClientRect().left - rightMenu.offsetWidth / 2;
+                    const menuTop = e.clientY - container.getBoundingClientRect().top - rightMenu.offsetHeight / 2;
+                    rightMenu.style.left = `${Math.max(0, Math.min(menuLeft, container.offsetWidth - rightMenu.offsetWidth))}px`;
+                    rightMenu.style.top = `${Math.max(0, Math.min(menuTop, container.offsetHeight - rightMenu.offsetHeight))}px`;
+                    rightMenu.style.display = 'block';
+                } else {
+                    rightMenu.style.display = 'none';
+                }
+            });
+
+            // 菜单操作（修复分机房匹配逻辑，确保重排正确）
+            rightMenu.addEventListener('click', function(e) {
+                if (!currentNode || !e.target.dataset.action) return;
+                const action = e.target.dataset.action;
+                const { roomRoot, roomCenter } = getNodeRoomInfo(currentNode);
+
+                switch(action) {
+                    case 'new':
+                        const childName = prompt(`为「${currentNode.text}」新建子节点`, `子节点-${Date.now().slice(-4)}`);
+                        if (!childName?.trim()) return;
+                        const childNode = new JTopo.Node(childName.trim());
+                        childNode.fontSize = 11;
+                        childNode.fillColor = '#86909C';
+                        childNode.textColor = '#fff';
+                        childNode.radius = 16;
+                        scene.add(childNode);
+                        new JTopo.Link(currentNode, childNode, stage).strokeColor = '#86909C';
+                        layoutInnerNodes(roomRoot, roomCenter);
+                        break;
+                    case 'delete':
+                        // 先删除关联的Link，再删除Node（避免JTopo内部引用错误）
+                        currentNode.links.forEach(link => scene.remove(link));
+                        scene.remove(currentNode);
+                        layoutInnerNodes(roomRoot, roomCenter);
+                        break;
+                    case 'query':
+                        const childCount = currentNode.links.length;
+                        alert(`节点：${currentNode.text}\n所属分机房：${roomRoot.text.split('-')[0]}\n子节点数：${childCount}`);
+                        break;
+                }
+                rightMenu.style.display = 'none';
+            });
+
+            // 辅助：获取节点所属分机房
+            function getNodeRoomInfo(node) {
+                let roomRoot = node;
+                // 向上追溯到分机房根节点（通过名称特征匹配）
+                while (!roomRoot.text.includes('分机房') || !roomRoot.text.includes('根节点')) {
+                    const parentLink = roomRoot.links.find(link => {
+                        const prev = link.source === roomRoot ? link.target : link.source;
+                        return prev !== roomRoot;
+                    });
+                    if (!parentLink) break;
+                    roomRoot = parentLink.source === roomRoot ? parentLink.target : parentLink.source;
+                }
+                const roomIndex = parseInt(roomRoot.text.split('分机房')[1].split('-')[0]) - 1;
+                return { roomRoot, roomCenter: roomLayout.centers[roomIndex] };
+            }
+
+            // 7. 初始化架构（顺序执行，确保依赖就绪）
+            calcRoomCenters();
+            roomLayout.centers.forEach((center, idx) => createRoomTree(idx, center));
+            
+            // 启用画布交互（拖拽、缩放）
+            stage.mode = 'panZoom';
+            stage.wheelZoom = true;
+        });
+    </script>
+</body>
+</html>
