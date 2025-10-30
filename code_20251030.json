@@ -1,0 +1,48 @@
+{
+  "folders": [
+    {
+      "path": "." // 远程服务器上的项目根目录（确保 Remote SSH 已连接且路径正确）
+    }
+  ],
+  "settings": {
+    "java.home": "/opt/jdk/21",
+    "java.classpath": [
+      "${workspaceFolder}/target/classes",
+      "${workspaceFolder}/target/dependency/*",
+      "/opt/jdk/21/lib/*"
+    ],
+    "java.configuration.runtimes": [
+      { "name": "JavaSE-21", "path": "/opt/jdk/21", "default": true }
+    ],
+    "java.debug.settings.onBuildFailureProceed": true,
+    "java.compiler.path": "/opt/jdk/21/bin/javac",
+    "java.configuration.updateBuildConfiguration": "automatic",
+    "java.project.sourcePaths": ["${workspaceFolder}/src/main/java"], // 明确源码路径
+    "java.project.outputPath": "${workspaceFolder}/target/classes", // 明确输出路径
+    "java.project.referencedLibraries": ["${workspaceFolder}/target/dependency/*"] // 明确依赖路径
+  },
+  "launch": {
+    "configurations": [
+      {
+        "type": "java",
+        "name": "Debug Spring Boot (Remote)",
+        "request": "launch",
+        "mainClass": "com.example.demo.DemoApplication", // 替换为你的主类全路径
+        "projectName": "${workspaceFolderBasename}", // 自动获取项目名（推荐）
+        "args": "--spring.profiles.active=dev",
+        "env": {
+          "JAVAHOME": "/opt/jdk/21",
+          "CLASSPATH": "${workspaceFolder}/target/classes:${workspaceFolder}/target/dependency/*:/opt/jdk/21/lib/*",
+          "SPRING_PROFILES_ACTIVE": "dev"
+        },
+        "classPaths": [
+          "${workspaceFolder}/target/classes",
+          "${workspaceFolder}/target/dependency/*",
+          "/opt/jdk/21/lib/*"
+        ],
+        "console": "integratedTerminal",
+        "cwd": "${workspaceFolder}" // 明确工作目录（远程环境必需）
+      }
+    ]
+  }
+}
