@@ -1,0 +1,309 @@
+豆包：
+### gRPC 流式上传（stream HttpBody）+ 网关适配方案（支持 HTTP 分块上传）
+核心思路：gRPC 服务端处理流式 `HttpBody` 入参，网关通过 **HTTP 分块传输编码（Chunked Transfer Encoding）** 适配，客户端用 `curl` 或工具分块上传文件，最终网关将 HTTP 分块转为 gRPC 流消息。以下是完整实现：
+
+#### 1. 关键前提说明
+- gRPC-Gateway v2 原生支持流式 gRPC 转 HTTP 分块上传，无需额外复杂配置，但需确保：
+  - 网关启用 `Chunked` 传输支持（默认启用）；
+  - 自定义 Marshaler 适配流式 `HttpBody` 的每一块二进制数据；
+  - 服务端正确处理流式 `HttpBody` 消息拼接。
+
+#### 2. Protobuf 定义（保持流式定义不变）
+```proto
+syntax = "proto3";
+package yourpackage;
+
+import "google/api/annotations.proto";
+import "google/api/httpbody.proto";
+
+option go_package = "./pb;pb";
+
+message WxResponse {
+  int32 code = 1;
+  string message = 2;
+  int64 file_size = 3; // 总文件大小
+}
+
+service YourService {
+  // 流式上传：客户端分块发送 HttpBody，服务端接收完后返回响应
+  rpc UpContents(stream google.api.HttpBody) returns (WxResponse) {
+    option (google.api.http) = {
+      post: "/v1/UpContents"
+      body: "data" // 绑定 HttpBody.data 为二进制流
+    };
+  }
+}
+```
+
+#### 3. 自定义 Marshaler（适配流式 HttpBody 分块）
+创建 `stream_httpbody_marshaler.go`，核心是**逐块透传二进制分块**：
+```go
+package main
+
+import (
+	"io"
+	"net/http"
+
+	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
+	"google.api/go/genproto/googleapis/api/httpbody"
+	"google.golang.org/protobuf/proto"
+)
+
+// StreamHttpBodyMarshaler 适配流式 HttpBody 分块上传
+type StreamHttpBodyMarshaler struct {
+	runtime.JSONPb // 继承默认 JSON 处理（响应仍用 JSON）
+}
+
+// Unmarshal 重写反序列化：单块 HttpBody 透传
+func (m *StreamHttpBodyMarshaler) Unmarshal(data []byte, v interface{}) error {
+	// 每一块 gRPC 流消息都是 HttpBody，直接将 HTTP 分块数据赋值给 data
+	if reqBody, ok := v.(*httpbody.HttpBody); ok {
+		reqBody.Data = data
+		// 从 HTTP 请求头获取 Content-Type（若客户端指定）
+		// 注：网关会自动将 HTTP 头透传给 gRPC Metadata，服务端可从 Metadata 读取
+		return nil
+	}
+	return m.JSONPb.Unmarshal(data, v)
+}
+
+// NewDecoder 支持 HTTP 分块流式读取（核心：逐块返回分块数据）
+func (m *StreamHttpBodyMarshaler) NewDecoder(r io.Reader) runtime.Decoder {
+	return &streamDecoder{
+		r:        r,
+		buf:      make([]byte, 4096), // 4KB 缓冲区（可调整）
+		defaultPb: m.JSONPb,
+	}
+}
+
+// streamDecoder 流式解码器：逐块读取 HTTP 分块数据
+type streamDecoder struct {
+	r        io.Reader
+	buf      []byte
+	defaultPb runtime.JSONPb
+}
+
+func (d *streamDecoder) Decode(v interface{}) error {
+	// 关键：每次读取一块 HTTP 分块数据（直到 EOF 表示上传完成）
+	n, err := d.r.Read(d.buf)
+	if err != nil {
+		if err == io.EOF {
+			return io.EOF // 分块读取完成，结束流
+		}
+		return err
+	}
+
+	// 将读取到的分块数据赋值给 HttpBody.data
+	if reqBody, ok := v.(*httpbody.HttpBody); ok {
+		reqBody.Data = d.buf[:n] // 仅保留实际读取的字节
+		return nil
+	}
+
+	// 其他类型用默认 JSON 解码（流式场景基本不会触发）
+	return d.defaultPb.NewDecoder(bytes.NewReader(d.buf[:n])).Decode(v)
+}
+
+// ContentType 适配分块上传的 Content-Type
+func (m *StreamHttpBodyMarshaler) ContentType(v interface{}) string {
+	// 流式上传时，HTTP 头为 multipart/form-data 或 application/octet-stream（分块传输）
+	if _, ok := v.(*httpbody.HttpBody); ok {
+		return "application/octet-stream; charset=utf-8"
+	}
+	// 响应 WxResponse 仍返回 JSON
+	return "application/json; charset=utf-8"
+}
+```
+
+#### 4. 网关实现（启用流式支持）
+修改 `gateway.go`，核心是注册自定义 Marshaler，无需额外流式配置（网关自动适配）：
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"net/http"
+
+	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
+	pb "github.com/your-username/your-project/pb" // 替换为你的 pb 包路径
+)
+
+func main() {
+	ctx := context.Background()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// 配置网关：使用流式 Marshaler，启用分块传输
+	mux := runtime.NewServeMux(
+		runtime.WithMarshalerOption(runtime.MIMEWildcard, &StreamHttpBodyMarshaler{}),
+		// 允许透传请求头（如文件名、授权信息等）
+		runtime.WithIncomingHeaderMatcher(func(key string) (string, bool) {
+			return key, true
+		}),
+		// 启用流式响应支持（默认启用，显式声明更清晰）
+		runtime.WithStreamResponseBodyFunc(runtime.DefaultStreamResponseBody),
+	)
+
+	// 连接 gRPC 服务端（流式传输无需额外拨号选项）
+	opts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	if err := pb.RegisterYourServiceHandlerFromEndpoint(ctx, mux, "localhost:50051", opts); err != nil {
+		log.Fatalf("网关注册失败：%v", err)
+	}
+
+	// 启动网关（HTTP 分块传输自动支持）
+	log.Println("流式上传网关启动：http://localhost:8080")
+	if err := http.ListenAndServe(":8080", mux); err != nil {
+		log.Fatalf("网关启动失败：%v", err)
+	}
+}
+```
+
+#### 5. 服务端实现（处理流式 HttpBody 拼接）
+```go
+package main
+
+import (
+	"context"
+	"io"
+	"log"
+	"net"
+	"os"
+	"path/filepath"
+
+	"google.api/go/genproto/googleapis/api/httpbody"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
+
+	pb "github.com/your-username/your-project/pb" // 替换为你的 pb 包路径
+)
+
+const uploadDir = "./stream_uploads" // 流式上传文件存储目录
+
+type yourServer struct {
+	pb.UnimplementedYourServiceServer
+}
+
+// UpContents 处理流式 HttpBody：逐块读取并拼接文件
+func (s *yourServer) UpContents(stream pb.YourService_UpContentsServer) error {
+	// 1. 从请求头获取文件名（客户端通过 HTTP 头传递，网关透传给 gRPC Metadata）
+	md, ok := grpc.GetIncomingContext(stream.Context()).Value("grpcgateway-Metadata").(map[string][]string)
+	if !ok {
+		return stream.SendAndClose(&pb.WxResponse{Code: 400, Message: "缺少文件名"})
+	}
+	filenameList, ok := md["filename"]
+	if !ok || len(filenameList) == 0 {
+		return stream.SendAndClose(&pb.WxResponse{Code: 400, Message: "文件名不能为空"})
+	}
+	filename := filenameList[0]
+	filePath := filepath.Join(uploadDir, filename)
+
+	// 2. 创建文件（覆盖已存在文件）
+	if err := os.MkdirAll(uploadDir, 0755); err != nil {
+		return stream.SendAndClose(&pb.WxResponse{Code: 500, Message: "创建目录失败"})
+	}
+	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return stream.SendAndClose(&pb.WxResponse{Code: 500, Message: "创建文件失败"})
+	}
+	defer file.Close()
+
+	// 3. 逐块读取流式消息，写入文件
+	var totalSize int64
+	for {
+		chunk, err := stream.Recv() // 接收每一块 HttpBody
+		if err != nil {
+			if err == io.EOF {
+				break // 流结束
+			}
+			return stream.SendAndClose(&pb.WxResponse{Code: 500, Message: "接收分块失败：" + err.Error()})
+		}
+
+		// 写入当前分块数据
+		n, err := file.Write(chunk.Data)
+		if err != nil {
+			return stream.SendAndClose(&pb.WxResponse{Code: 500, Message: "写入文件失败：" + err.Error()})
+		}
+		totalSize += int64(n)
+		log.Printf("接收分块：%d 字节，累计：%d 字节", n, totalSize)
+	}
+
+	// 4. 上传完成，返回响应
+	return stream.SendAndClose(&pb.WxResponse{
+		Code:     200,
+		Message:  "流式上传成功",
+		FileSize: totalSize,
+	})
+}
+
+func main() {
+	// 启动 gRPC 服务端
+	lis, err := net.Listen("tcp", ":50051")
+	if err != nil {
+		log.Fatalf("监听失败：%v", err)
+	}
+
+	s := grpc.NewServer()
+	pb.RegisterYourServiceServer(s, &yourServer{})
+	reflection.Register(s) // 启用反射调试
+
+	log.Printf("gRPC 流式服务启动：%s", lis.Addr())
+	if err := s.Serve(lis); err != nil {
+		log.Fatalf("服务启动失败：%v", err)
+	}
+}
+```
+
+#### 6. 代码生成脚本（无需修改，正常生成流式代码）
+```bash
+#!/bin/bash
+PROTO_DIR="./proto"
+PB_DIR="./pb"
+API_COMMON_PROTOS_DIR=$(go list -m -f {{.Dir}} github.com/googleapis/api-common-protos/go)
+
+mkdir -p $PB_DIR
+
+protoc --proto_path=$PROTO_DIR \
+  --proto_path=$API_COMMON_PROTOS_DIR \
+  --go_out=$PB_DIR --go_opt=paths=source_relative \
+  --go-grpc_out=$PB_DIR --go-grpc_opt=paths=source_relative \
+  --grpc-gateway_out=$PB_DIR --grpc-gateway_opt=paths=source_relative \
+  $PROTO_DIR/your_service.proto
+
+echo "流式代码生成完成"
+```
+
+#### 7. 测试命令（HTTP 分块上传，适配 gRPC 流）
+使用 `curl` 模拟分块上传（`-T -` 表示从标准输入读取，自动启用分块传输）：
+```bash
+# 方式 1：直接上传文件（curl 自动分块）
+curl -X POST http://localhost:8080/v1/UpContents \
+  -H "filename: test-large-file.mp4" \ # 传递文件名（服务端从请求头获取）
+  -H "Content-Type: application/octet-stream" \
+  -T ./test-large-file.mp4 # 自动分块上传
+
+# 方式 2：手动分块上传（模拟客户端分块）
+cat ./test-large-file.mp4 | split -b 1MB -d - chunks_ && \
+for chunk in chunks_*; do
+  curl -X POST http://localhost:8080/v1/UpContents \
+    -H "filename: test-large-file.mp4" \
+    -H "Content-Type: application/octet-stream" \
+    -H "Transfer-Encoding: chunked" \
+    --data-binary @$chunk
+  rm $chunk
+done
+
+# 响应示例（所有分块上传完成后返回）：
+# {"code":200,"message":"流式上传成功","file_size":10485760}
+```
+
+#### 8. 关键注意事项
+- **分块传输标识**：HTTP 客户端需启用 `Transfer-Encoding: chunked`（`curl -T` 或 `--data-binary` 自动启用）；
+- **元数据传递**：文件名、授权信息等通过 HTTP 头传递，网关自动透传给 gRPC Metadata，服务端从 `grpcgateway-Metadata` 中读取；
+- **缓冲区大小**：`streamDecoder` 中的 `buf` 大小（默认 4KB）可根据文件大小调整（大文件建议 64KB/128KB）；
+- **断点续传**：若需支持断点续传，需在服务端添加分块编号、偏移量记录（客户端通过请求头传递 `Range` 或自定义偏移量）。
+
+需要我帮你补充断点续传的实现，或提供 Java 客户端（Spring Boot）的流式上传示例吗？
+
+内容由 AI 生成
