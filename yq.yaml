@@ -1,0 +1,39 @@
+
+# https://mikefarah.gitbook.io/yq/operators/select#select-elements-from-array-using-wildcard-suffix
+https://mikefarah.gitbook.io/yq/operators/select#select-and-with_entries-to-filter-map-keys
+#yq '.vipexorgiac.devcd.tst|with_entries(select(.key == "asm" or .key == "dns"))|.' projectCfg.yml
+#yq '.vipexorgiac.devcd.tst|with_entries(select(.key == "asm" or .key == "dns"))|.vipexorgiac.devcd.tst = .' projectCfg.yml
+#yq '.vipexorgiac.devcd.tst|with_entries(select(.key == "asm" or .key == "dns"))|=.vipexorgiac.devcd.tst = .' projectCfg.yml
+
+# 选择 asm, dns
+yq '.vipexorgiac.devcd.tst|=with_entries(select(.key == "asm" or .key == "dns"))| .' projectCfg.yml
+		yq '.vipexorgiac.devcd.tst|=with_entries(select(.|keys|contains(["asm", "dns"])))| .' projectCfg.yml
+	yq 'del( .[] | select(. == "*at") )' sample.yml
+		yq 'del(   .vipexorgiac.devcd.tst|with_entries(select(.key == "asm"))| .   )' projectCfg.yml
+		yq 'del(   .vipexorgiac.devcd.tst|select(.key == "asm")| .   )' projectCfg.yml
+	yq 'del(   .vipexorgiac.devcd.tst|.asm| .   )' projectCfg.yml
+	yq 'del(   .vipexorgiac.devcd.tst|select(.key == "asm")| .   )' projectCfg.yml
+	yq '.vipexorgiac.devcd.tst|with_entries(select(.key == "asm" or .key == "dns"))| .' projectCfg.yml
+	yq 'del(   .vipexorgiac.devcd.tst|(.asm or .dns)| .   )' projectCfg.yml
+	yq '.vipexorgiac.devcd.tst|with_entries| .' projectCfg.yml
+
+	yq '.vipexorgiac.devcd.tst|contains([keys - ["asm","dns"]])| .' projectCfg.yml
+
+	yq '.vipexorgiac.devcd.tst|=(filter(.key == "asm" or .key == "dns"))| .' projectCfg.yml
+
+yq '.myMap |= omit(["hamster", "cat", "goat"])' sample.yml
+# 排除 asm, dns
+yq '.vipexorgiac.devcd.tst|=omit(["asm", "dns"])| .' projectCfg.yml
+
+yq '.myMap |= pick(["hamster", "cat", "goat"])' sample.yml
+yq '.vipexorgiac.devcd.tst|=pick(["asm", "dns"])| .' projectCfg.yml
+
+
+
+yq '.vipexorgiac.devcd.tst|=pick(["asm"])| .' projectCfg.yml
+yq '.vipexorgiac.devcd.tst|=with_entries(select(.key == "asm" or .key == "dbase" or .key == "dns"))| .' projectCfg.yml
+yq '.vipexorgiac.devcd.tst|=omit(["dns"])| .' projectCfg.yml
+
+
+
+
